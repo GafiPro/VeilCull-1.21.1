@@ -16,10 +16,10 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,7 +39,7 @@ public class VeilCull implements ModInitializer {
     private static final int PING_UPDATE_INTERVAL_TICKS = 10;
 
     private static final Map<UUID, FakeLagState> FAKE_LAGS = new HashMap<>();
-    private static final Set<UUID> VANISHED_PLAYERS = new java.util.HashSet<>();
+    private static final Set<UUID> VANISHED_PLAYERS = new HashSet<>();
     private static final Map<UUID, Boolean> PREVIOUS_INVISIBLE_STATE = new HashMap<>();
 
     private static final Set<Object> INTERCEPTED_THIS_TICK =
@@ -77,8 +77,6 @@ public class VeilCull implements ModInitializer {
             if (player == null) {
                 continue;
             }
-
-            FakeLagState state = entry.getValue();
 
             fakeLagPlayers.add(player);
         }

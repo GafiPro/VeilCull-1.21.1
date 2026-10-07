@@ -7,14 +7,19 @@ import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.command.ServerCommandSource;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static net.minecraft.server.command.CommandManager.argument;
 import static net.minecraft.server.command.CommandManager.literal;
@@ -23,46 +28,60 @@ public class VeilCull implements ModInitializer {
     public static final String MOD_ID = "veilcull";
     public static final VeilCullConfig CONFIG = new VeilCullConfig();
 
-    private static final Map<UUID, Integer> FAKE_PINGS = new HashMap<>();
+    private static final int RANDOM_PING_MIN = 7000;
+    private static final int RANDOM_PING_MAX = 9800;
+
+    private static final Map<UUID, FakeLagState> FAKE_LAGS = new HashMap<>();
+    private static final Set<Object> INTERCEPTED_THIS_TICK =
+            Collections.newSetFromMap(new IdentityHashMap<>());
+
     private static int pingBroadcastTicker = 0;
 
     @Override
     public void onInitialize() {
         CONFIG.load();
-
         registerCommands();
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
-            if (!FAKE_PINGS.isEmpty()) {
-                for (Map.Entry<UUID, Integer> entry : FAKE_PINGS.entrySet()) {
-                    ServerPlayerEntity player = server.getPlayerManager().getPlayer(entry.getKey());
-                    if (player != null) {
-                        player.latency = entry.getValue();
-                    }
-                }
+            INTERCEPTED_THIS_TICK.clear();
 
-                // Vanilla periodically refreshes tab-list latency. Sending an UPDATE_LATENCY
-                // packet regularly keeps the fake value visible to client-side ping displays.
-                if (++pingBroadcastTicker >= 10) {
-                    pingBroadcastTicker = 0;
-                    for (Map.Entry<UUID, Integer> entry : FAKE_PINGS.entrySet()) {
-                        ServerPlayerEntity target = server.getPlayerManager().getPlayer(entry.getKey());
-                        if (target == null) {
-                            continue;
-                        }
-
-                        PlayerListS2CPacket packet = new PlayerListS2CPacket(
-                                java.util.EnumSet.of(PlayerListS2CPacket.Action.UPDATE_LATENCY),
-                                java.util.List.of(target)
-                        );
-
-                        for (ServerPlayerEntity viewer : server.getPlayerManager().getPlayerList()) {
-                            viewer.networkHandler.sendPacket(packet);
-                        }
-                    }
-                }
-            } else {
+            if (FAKE_LAGS.isEmpty()) {
                 pingBroadcastTicker = 0;
+                return;
+            }
+
+            for (Map.Entry<UUID, FakeLagState> entry : FAKE_LAGS.entrySet()) {
+                ServerPlayerEntity player = server.getPlayerManager().getPlayer(entry.getKey());
+                if (player != null) {
+                    FakeLagState state = entry.getValue();
+
+                    if (state.random) {
+                        state.ping = randomPing();
+                    }
+
+                    player.latency = state.ping;
+                }
+            }
+
+            // Refresh often enough for client-side ping displays to keep showing the fake value.
+            if (++pingBroadcastTicker >= 10) {
+                pingBroadcastTicker = 0;
+
+                for (Map.Entry<UUID, FakeLagState> entry : FAKE_LAGS.entrySet()) {
+                    ServerPlayerEntity target = server.getPlayerManager().getPlayer(entry.getKey());
+                    if (target == null) {
+                        continue;
+                    }
+
+                    PlayerListS2CPacket packet = new PlayerListS2CPacket(
+                            EnumSet.of(PlayerListS2CPacket.Action.UPDATE_LATENCY),
+                            java.util.List.of(target)
+                    );
+
+                    for (ServerPlayerEntity viewer : server.getPlayerManager().getPlayerList()) {
+                        viewer.networkHandler.sendPacket(packet);
+                    }
+                }
             }
         });
     }
@@ -79,7 +98,9 @@ public class VeilCull implements ModInitializer {
 
                                         Text fakeMessage = Text.literal("<" + player + "> ")
                                                 .append(Text.literal(message));
-                                        ctx.getSource().getServer().getPlayerManager().broadcast(fakeMessage, false);
+
+                                        ctx.getSource().getServer().getPlayerManager()
+                                                .broadcast(fakeMessage, false);
 
                                         return 1;
                                     }))));
@@ -144,9 +165,12 @@ public class VeilCull implements ModInitializer {
             dispatcher.register(literal("fakelag")
                     .requires(source -> source.hasPermissionLevel(2))
                     .then(argument("player", StringArgumentType.word())
-                            .executes(ctx -> setFakeLag(ctx.getSource(), StringArgumentType.getString(ctx, "player"), 9999))
+                            .executes(ctx -> enableRandomFakeLag(
+                                    ctx.getSource(),
+                                    StringArgumentType.getString(ctx, "player")
+                            ))
                             .then(argument("ping", IntegerArgumentType.integer(0, 1000000))
-                                    .executes(ctx -> setFakeLag(
+                                    .executes(ctx -> setFixedOrDisableFakeLag(
                                             ctx.getSource(),
                                             StringArgumentType.getString(ctx, "player"),
                                             IntegerArgumentType.getInteger(ctx, "ping")
@@ -154,16 +178,30 @@ public class VeilCull implements ModInitializer {
 
             dispatcher.register(literal("interceptmsg")
                     .requires(source -> source.hasPermissionLevel(2))
-                    .executes(ctx -> toggleInterception(ctx.getSource()))
-                    .then(argument("player", StringArgumentType.word())
-                            .executes(ctx -> enableInterceptionFor(
-                                    ctx.getSource(),
-                                    StringArgumentType.getString(ctx, "player")
-                            ))));
+                    .executes(ctx -> toggleGlobalInterception(ctx.getSource())));
         });
     }
 
-    private static int setFakeLag(ServerCommandSource source, String name, int ping) {
+    private static int enableRandomFakeLag(ServerCommandSource source, String name) {
+        ServerPlayerEntity target = source.getServer().getPlayerManager().getPlayer(name);
+        if (target == null) {
+            source.sendError(Text.literal("O jogador '" + name + "' não está online."));
+            return 0;
+        }
+
+        int ping = randomPing();
+        FAKE_LAGS.put(target.getUuid(), new FakeLagState(true, ping));
+        target.latency = ping;
+
+        source.sendFeedback(() -> Text.literal(
+                "Fake lag de " + name + " ativado: ping a variar entre "
+                        + RANDOM_PING_MIN + " e " + RANDOM_PING_MAX + " ms."
+        ), false);
+
+        return 1;
+    }
+
+    private static int setFixedOrDisableFakeLag(ServerCommandSource source, String name, int ping) {
         ServerPlayerEntity target = source.getServer().getPlayerManager().getPlayer(name);
         if (target == null) {
             source.sendError(Text.literal("O jogador '" + name + "' não está online."));
@@ -171,82 +209,56 @@ public class VeilCull implements ModInitializer {
         }
 
         if (ping == 0) {
-            FAKE_PINGS.remove(target.getUuid());
+            FAKE_LAGS.remove(target.getUuid());
             source.sendFeedback(() -> Text.literal("Fake lag removido de " + name + "."), false);
             return 1;
         }
 
-        FAKE_PINGS.put(target.getUuid(), ping);
+        FAKE_LAGS.put(target.getUuid(), new FakeLagState(false, ping));
         target.latency = ping;
-        source.sendFeedback(() -> Text.literal("Ping de " + name + " definido para " + ping + " ms."), false);
+
+        source.sendFeedback(() -> Text.literal(
+                "Ping falso de " + name + " definido para " + ping + " ms."
+        ), false);
+
         return 1;
     }
 
-    private static int toggleInterception(ServerCommandSource source) {
+    private static int toggleGlobalInterception(ServerCommandSource source) {
         ServerPlayerEntity observer = source.getPlayer();
+
         if (observer == null) {
             source.sendError(Text.literal("Este comando tem de ser executado por um jogador."));
-            return 0;
-        }
-
-        if (CONFIG.interceptPlayer == null || CONFIG.interceptPlayer.isBlank()) {
-            source.sendError(Text.literal("Ainda não existe um jogador alvo. Usa /interceptmsg <player> primeiro."));
-            return 0;
-        }
-
-        if (observer.getGameProfile().getName().equalsIgnoreCase(CONFIG.interceptPlayer)) {
-            source.sendError(Text.literal("O observador e o jogador interceptado não podem ser a mesma pessoa."));
             return 0;
         }
 
         CONFIG.interceptEnabled = !CONFIG.interceptEnabled;
-        CONFIG.interceptObserver = observer.getGameProfile().getName();
+
+        if (CONFIG.interceptEnabled) {
+            CONFIG.interceptObserver = observer.getGameProfile().getName();
+
+            source.sendFeedback(() -> Text.literal(
+                    "Interceptação GLOBAL ativada. As mensagens enviadas aos jogadores serão copiadas para "
+                            + CONFIG.interceptObserver + "."
+            ), false);
+        } else {
+            source.sendFeedback(
+                    () -> Text.literal("Interceptação GLOBAL desativada."),
+                    false
+            );
+        }
+
         CONFIG.save();
-
-        boolean enabled = CONFIG.interceptEnabled;
-        source.sendFeedback(() -> Text.literal(
-                enabled
-                        ? "Interceptação ativada para " + CONFIG.interceptPlayer + "."
-                        : "Interceptação desativada."
-        ), false);
-
         return 1;
     }
 
-    private static int enableInterceptionFor(ServerCommandSource source, String target) {
-        ServerPlayerEntity observer = source.getPlayer();
-        if (observer == null) {
-            source.sendError(Text.literal("Este comando tem de ser executado por um jogador."));
-            return 0;
-        }
-
-        if (observer.getGameProfile().getName().equalsIgnoreCase(target)) {
-            source.sendError(Text.literal("O observador e o jogador interceptado não podem ser a mesma pessoa."));
-            return 0;
-        }
-
-        CONFIG.interceptPlayer = target;
-        CONFIG.interceptObserver = observer.getGameProfile().getName();
-        CONFIG.interceptEnabled = true;
-        CONFIG.save();
-
-        source.sendFeedback(() -> Text.literal(
-                "Interceptação ativada: " + target + " -> " + CONFIG.interceptObserver + "."
-        ), false);
-
-        return 1;
-    }
-
+    /**
+     * Intercepts every system message sent to every player while global interception is enabled.
+     * Identity-based deduplication prevents a broadcasted Text object from being copied once per recipient.
+     */
     public static void interceptMessage(ServerPlayerEntity recipient, Text message) {
-        if (!CONFIG.interceptEnabled
-                || CONFIG.interceptPlayer == null
-                || CONFIG.interceptPlayer.isBlank()
-                || CONFIG.interceptObserver == null
+        if (!CONFIG.interceptEnabled || CONFIG.interceptObserver == null
                 || CONFIG.interceptObserver.isBlank()) {
-            return;
-        }
-
-        if (!recipient.getGameProfile().getName().equalsIgnoreCase(CONFIG.interceptPlayer)) {
             return;
         }
 
@@ -254,35 +266,11 @@ public class VeilCull implements ModInitializer {
             return;
         }
 
-        ServerPlayerEntity observer = recipient.getServer()
-                .getPlayerManager()
-                .getPlayer(CONFIG.interceptObserver);
-
-        if (observer == null) {
+        if (!INTERCEPTED_THIS_TICK.add(message)) {
             return;
         }
 
-        observer.sendMessage(
-                Text.literal("[Intercept] ").formatted(Formatting.DARK_GRAY)
-                        .append(message.copy())
-        );
-    }
-
-    public static void interceptChatMessage(ServerPlayerEntity recipient, Text message) {
-        if (!CONFIG.interceptEnabled
-                || CONFIG.interceptPlayer == null
-                || CONFIG.interceptObserver == null) {
-            return;
-        }
-
-        if (!recipient.getGameProfile().getName().equalsIgnoreCase(CONFIG.interceptPlayer)) {
-            return;
-        }
-
-        ServerPlayerEntity observer = recipient.getServer()
-                .getPlayerManager()
-                .getPlayer(CONFIG.interceptObserver);
-
+        ServerPlayerEntity observer = findObserver(recipient.getServer());
         if (observer == null || observer == recipient) {
             return;
         }
@@ -293,7 +281,62 @@ public class VeilCull implements ModInitializer {
         );
     }
 
+    /**
+     * Intercepts every chat message while global interception is enabled.
+     * SentMessage is the shared object for a chat broadcast, so identity deduplication avoids duplicates.
+     */
+    public static void interceptChatMessage(
+            ServerPlayerEntity recipient,
+            Object sentMessageIdentity,
+            Text content
+    ) {
+        if (!CONFIG.interceptEnabled || CONFIG.interceptObserver == null
+                || CONFIG.interceptObserver.isBlank()) {
+            return;
+        }
+
+        if (recipient.getGameProfile().getName().equalsIgnoreCase(CONFIG.interceptObserver)) {
+            return;
+        }
+
+        if (!INTERCEPTED_THIS_TICK.add(sentMessageIdentity)) {
+            return;
+        }
+
+        ServerPlayerEntity observer = findObserver(recipient.getServer());
+        if (observer == null || observer == recipient) {
+            return;
+        }
+
+        observer.sendMessage(
+                Text.literal("[Intercept] ").formatted(Formatting.DARK_GRAY)
+                        .append(content.copy())
+        );
+    }
+
+    private static ServerPlayerEntity findObserver(MinecraftServer server) {
+        if (CONFIG.interceptObserver == null || CONFIG.interceptObserver.isBlank()) {
+            return null;
+        }
+
+        return server.getPlayerManager().getPlayer(CONFIG.interceptObserver);
+    }
+
+    private static int randomPing() {
+        return ThreadLocalRandom.current().nextInt(RANDOM_PING_MIN, RANDOM_PING_MAX + 1);
+    }
+
     public static void clearFakePing(UUID uuid) {
-        FAKE_PINGS.remove(uuid);
+        FAKE_LAGS.remove(uuid);
+    }
+
+    private static final class FakeLagState {
+        private final boolean random;
+        private int ping;
+
+        private FakeLagState(boolean random, int ping) {
+            this.random = random;
+            this.ping = ping;
+        }
     }
 }

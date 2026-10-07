@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "veillull",
+  "id": "veilcull",
   "version": "${version}",
   "name": "VeilCull",
   "description": "Server-side prank commands for Minecraft 1.21.1.",
@@ -9,11 +9,11 @@
   "environment": "server",
   "entrypoints": {
     "main": [
-      "me.gafipro.veillull.VeilCull"
+      "me.gafipro.veilcull.VeilCull"
     ]
   },
   "mixins": [
-    "veillull.mixins.json"
+    "veilcull.mixins.json"
   ],
   "depends": {
     "fabricloader": ">=0.16.10",

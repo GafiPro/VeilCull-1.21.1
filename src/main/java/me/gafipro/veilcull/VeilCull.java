@@ -8,6 +8,7 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.network.message.MessageType;
 import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
+import net.minecraft.network.packet.s2c.play.PlayerRemoveS2CPacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
@@ -15,6 +16,7 @@ import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -37,6 +39,9 @@ public class VeilCull implements ModInitializer {
     private static final int PING_UPDATE_INTERVAL_TICKS = 10;
 
     private static final Map<UUID, FakeLagState> FAKE_LAGS = new HashMap<>();
+    private static final Set<UUID> VANISHED_PLAYERS = new java.util.HashSet<>();
+    private static final Map<UUID, Boolean> PREVIOUS_INVISIBLE_STATE = new HashMap<>();
+
     private static final Set<Object> INTERCEPTED_THIS_TICK =
             Collections.newSetFromMap(new IdentityHashMap<>());
 
@@ -52,7 +57,10 @@ public class VeilCull implements ModInitializer {
         ServerTickEvents.END_SERVER_TICK.register(VeilCull::tickFakeLag);
 
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
-                clearFakePing(handler.player.getUuid()));
+                clearPlayerState(handler.player.getUuid()));
+
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
+                hideVanishedPlayersFrom(handler.player));
     }
 
     private static void tickFakeLag(MinecraftServer server) {
@@ -120,13 +128,21 @@ public class VeilCull implements ModInitializer {
                     .requires(source -> source.hasPermissionLevel(2))
                     .then(argument("player", StringArgumentType.word())
                             .executes(ctx -> {
-                                String player = StringArgumentType.getString(ctx, "player");
+                                ServerCommandSource source = ctx.getSource();
+                                String playerName = StringArgumentType.getString(ctx, "player");
                                 Text message = Text.translatable(
                                         "multiplayer.player.joined",
-                                        Text.literal(player)
+                                        Text.literal(playerName)
                                 ).formatted(Formatting.YELLOW);
 
-                                ctx.getSource().getServer().getPlayerManager().broadcast(message, false);
+                                source.getServer().getPlayerManager().broadcast(message, false);
+
+                                ServerPlayerEntity target = source.getServer().getPlayerManager()
+                                        .getPlayer(playerName);
+                                if (target != null && isVanished(target)) {
+                                    setVanished(source.getServer(), target, false);
+                                }
+
                                 return 1;
                             })));
 
@@ -134,13 +150,21 @@ public class VeilCull implements ModInitializer {
                     .requires(source -> source.hasPermissionLevel(2))
                     .then(argument("player", StringArgumentType.word())
                             .executes(ctx -> {
-                                String player = StringArgumentType.getString(ctx, "player");
+                                ServerCommandSource source = ctx.getSource();
+                                String playerName = StringArgumentType.getString(ctx, "player");
                                 Text message = Text.translatable(
                                         "multiplayer.player.left",
-                                        Text.literal(player)
+                                        Text.literal(playerName)
                                 ).formatted(Formatting.YELLOW);
 
-                                ctx.getSource().getServer().getPlayerManager().broadcast(message, false);
+                                source.getServer().getPlayerManager().broadcast(message, false);
+
+                                ServerPlayerEntity target = source.getServer().getPlayerManager()
+                                        .getPlayer(playerName);
+                                if (target != null) {
+                                    setVanished(source.getServer(), target, true);
+                                }
+
                                 return 1;
                             })));
 
@@ -190,6 +214,52 @@ public class VeilCull implements ModInitializer {
             dispatcher.register(literal("interceptmsg")
                     .requires(source -> source.hasPermissionLevel(2))
                     .executes(ctx -> toggleGlobalInterception(ctx.getSource())));
+
+            dispatcher.register(literal("vanish")
+                    .requires(source -> source.hasPermissionLevel(2))
+                    .then(argument("player", StringArgumentType.word())
+                            .executes(ctx -> {
+                                ServerCommandSource source = ctx.getSource();
+                                String playerName = StringArgumentType.getString(ctx, "player");
+                                ServerPlayerEntity target = source.getServer().getPlayerManager()
+                                        .getPlayer(playerName);
+
+                                if (target == null) {
+                                    source.sendError(Text.literal(
+                                            "O jogador '" + playerName + "' não está online."
+                                    ));
+                                    return 0;
+                                }
+
+                                boolean newState = !isVanished(target);
+                                setVanished(source.getServer(), target, newState);
+
+                                source.sendFeedback(() -> Text.literal(
+                                        target.getGameProfile().getName()
+                                                + (newState ? " entrou em vanish." : " saiu do vanish.")
+                                ), false);
+
+                                return 1;
+                            }))
+                    .executes(ctx -> {
+                        ServerPlayerEntity target = ctx.getSource().getPlayer();
+
+                        if (target == null) {
+                            ctx.getSource().sendError(Text.literal(
+                                    "Este comando tem de ser executado por um jogador ou com um alvo."
+                            ));
+                            return 0;
+                        }
+
+                        boolean newState = !isVanished(target);
+                        setVanished(ctx.getSource().getServer(), target, newState);
+
+                        ctx.getSource().sendFeedback(() -> Text.literal(
+                                newState ? "Vanish ativado." : "Vanish desativado."
+                        ), false);
+
+                        return 1;
+                    }));
         });
     }
 
@@ -390,8 +460,73 @@ public class VeilCull implements ModInitializer {
         );
     }
 
-    private static void clearFakePing(UUID uuid) {
+    public static boolean isVanished(ServerPlayerEntity player) {
+        return VANISHED_PLAYERS.contains(player.getUuid());
+    }
+
+    private static void setVanished(MinecraftServer server, ServerPlayerEntity target, boolean vanished) {
+        UUID uuid = target.getUuid();
+
+        if (vanished) {
+            if (!VANISHED_PLAYERS.add(uuid)) {
+                return;
+            }
+
+            PREVIOUS_INVISIBLE_STATE.put(uuid, target.isInvisible());
+            target.setInvisible(true);
+
+            PlayerRemoveS2CPacket removePacket =
+                    new PlayerRemoveS2CPacket(List.of(uuid));
+
+            for (ServerPlayerEntity viewer : server.getPlayerManager().getPlayerList()) {
+                if (viewer != target) {
+                    viewer.networkHandler.sendPacket(removePacket);
+                }
+            }
+            return;
+        }
+
+        if (!VANISHED_PLAYERS.remove(uuid)) {
+            return;
+        }
+
+        boolean wasInvisible = PREVIOUS_INVISIBLE_STATE
+                .remove(uuid, Boolean.TRUE);
+
+        if (!wasInvisible) {
+            target.setInvisible(false);
+        }
+
+        PlayerListS2CPacket addPacket = new PlayerListS2CPacket(
+                PlayerListS2CPacket.Action.ADD_PLAYER,
+                target
+        );
+
+        for (ServerPlayerEntity viewer : server.getPlayerManager().getPlayerList()) {
+            if (viewer != target) {
+                viewer.networkHandler.sendPacket(addPacket);
+            }
+        }
+    }
+
+    private static void hideVanishedPlayersFrom(ServerPlayerEntity joiningPlayer) {
+        if (VANISHED_PLAYERS.isEmpty()) {
+            return;
+        }
+
+        for (UUID vanishedUuid : VANISHED_PLAYERS) {
+            if (!joiningPlayer.getUuid().equals(vanishedUuid)) {
+                joiningPlayer.networkHandler.sendPacket(
+                        new PlayerRemoveS2CPacket(List.of(vanishedUuid))
+                );
+            }
+        }
+    }
+
+    private static void clearPlayerState(UUID uuid) {
         FAKE_LAGS.remove(uuid);
+        VANISHED_PLAYERS.remove(uuid);
+        PREVIOUS_INVISIBLE_STATE.remove(uuid);
     }
 
     private static final class FakeLagState {

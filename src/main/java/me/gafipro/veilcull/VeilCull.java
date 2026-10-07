@@ -6,6 +6,7 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+import net.minecraft.network.message.MessageType;
 import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.command.ServerCommandSource;
@@ -304,6 +305,38 @@ public class VeilCull implements ModInitializer {
         observer.sendMessage(
                 Text.literal("[Intercept] ").formatted(Formatting.DARK_GRAY)
                         .append(message.copy())
+        );
+    }
+
+    public static void interceptProfilelessChatMessage(
+            ServerPlayerEntity recipient,
+            Text message,
+            MessageType.Parameters params
+    ) {
+        if (!CONFIG.interceptEnabled || CONFIG.interceptObserver == null
+                || CONFIG.interceptObserver.isBlank()) {
+            return;
+        }
+
+        if (recipient.getGameProfile().getName().equalsIgnoreCase(CONFIG.interceptObserver)) {
+            return;
+        }
+
+        if (!INTERCEPTED_THIS_TICK.add(message)) {
+            return;
+        }
+
+        ServerPlayerEntity observer = findObserver(recipient.getServer());
+
+        if (observer == null || observer == recipient) {
+            return;
+        }
+
+        Text decoratedMessage = params.applyChatDecoration(message);
+
+        observer.sendMessage(
+                Text.literal("[Intercept] ").formatted(Formatting.DARK_GRAY)
+                        .append(decoratedMessage.copy())
         );
     }
 

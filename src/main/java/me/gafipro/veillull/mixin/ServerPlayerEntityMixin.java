@@ -26,6 +26,10 @@ public abstract class ServerPlayerEntityMixin {
             net.minecraft.network.message.MessageType.Parameters params,
             CallbackInfo ci
     ) {
-        VeilCull.interceptChatMessage((ServerPlayerEntity) (Object) this, message.content());
+        VeilCull.interceptChatMessage(
+                (ServerPlayerEntity) (Object) this,
+                message,
+                message.content()
+        );
     }
 }

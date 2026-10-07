@@ -14,8 +14,11 @@ public final class VeilCullConfig {
             .setPrettyPrinting()
             .create();
 
+    /**
+     * Disabled on first installation. Once changed with /interceptmsg,
+     * the choice is written to config/veilcull.json and survives restarts.
+     */
     public boolean interceptEnabled = false;
-    public String interceptPlayer = "mvcraft_";
     public String interceptObserver = "";
 
     private Path getPath() {
@@ -35,15 +38,15 @@ public final class VeilCullConfig {
 
             String json = Files.readString(path, StandardCharsets.UTF_8);
             VeilCullConfig loaded = GSON.fromJson(json, VeilCullConfig.class);
+
             if (loaded != null) {
                 interceptEnabled = loaded.interceptEnabled;
-                interceptPlayer = loaded.interceptPlayer;
-                interceptObserver = loaded.interceptObserver;
+                interceptObserver = loaded.interceptObserver == null
+                        ? ""
+                        : loaded.interceptObserver;
             }
         } catch (IOException | RuntimeException e) {
-            // Keep safe defaults when the configuration is unreadable.
             interceptEnabled = false;
-            interceptPlayer = "mvcraft_";
             interceptObserver = "";
         }
     }
@@ -59,7 +62,7 @@ public final class VeilCullConfig {
                     StandardCharsets.UTF_8
             );
         } catch (IOException e) {
-            // Do not crash the server because a prank config could not be written.
+            // Configuration errors must not crash the server.
         }
     }
 }

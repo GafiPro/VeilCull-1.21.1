@@ -71,11 +71,6 @@ public class VeilCull implements ModInitializer {
 
             FakeLagState state = entry.getValue();
 
-            if (state.random && ++state.ticksUntilNextPing <= 0) {
-                state.ticksUntilNextPing = PING_UPDATE_INTERVAL_TICKS;
-                state.ping = randomPing();
-            }
-
             fakeLagPlayers.add(player);
         }
 
@@ -88,7 +83,6 @@ public class VeilCull implements ModInitializer {
         for (FakeLagState state : FAKE_LAGS.values()) {
             if (state.random) {
                 state.ping = randomPing();
-                state.ticksUntilNextPing = PING_UPDATE_INTERVAL_TICKS;
             }
         }
 
@@ -370,12 +364,10 @@ public class VeilCull implements ModInitializer {
     private static final class FakeLagState {
         private final boolean random;
         private int ping;
-        private int ticksUntilNextPing;
 
         private FakeLagState(boolean random, int ping) {
             this.random = random;
             this.ping = ping;
-            this.ticksUntilNextPing = PING_UPDATE_INTERVAL_TICKS;
         }
     }
 }

@@ -37,6 +37,7 @@ public class VeilCull implements ModInitializer {
     private static final int RANDOM_PING_MIN = 7000;
     private static final int RANDOM_PING_MAX = 9800;
     private static final int PING_UPDATE_INTERVAL_TICKS = 10;
+    private static final int VANISH_REFRESH_INTERVAL_TICKS = 20;
 
     private static final Map<UUID, FakeLagState> FAKE_LAGS = new HashMap<>();
     private static final Set<UUID> VANISHED_PLAYERS = new HashSet<>();
@@ -46,6 +47,7 @@ public class VeilCull implements ModInitializer {
             Collections.newSetFromMap(new IdentityHashMap<>());
 
     private static int pingBroadcastTicker = 0;
+    private static int vanishRefreshTicker = 0;
 
     @Override
     public void onInitialize() {
@@ -54,13 +56,18 @@ public class VeilCull implements ModInitializer {
 
         ServerTickEvents.START_SERVER_TICK.register(server -> INTERCEPTED_THIS_TICK.clear());
 
-        ServerTickEvents.END_SERVER_TICK.register(VeilCull::tickFakeLag);
+        ServerTickEvents.END_SERVER_TICK.register(VeilCull::tickServerState);
 
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
                 clearPlayerState(handler.player.getUuid()));
 
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
                 hideVanishedPlayersFrom(handler.player));
+    }
+
+    private static void tickServerState(MinecraftServer server) {
+        tickFakeLag(server);
+        tickVanish(server);
     }
 
     private static void tickFakeLag(MinecraftServer server) {
@@ -100,6 +107,37 @@ public class VeilCull implements ModInitializer {
 
         for (ServerPlayerEntity viewer : server.getPlayerManager().getPlayerList()) {
             viewer.networkHandler.sendPacket(packet);
+        }
+    }
+
+    private static void tickVanish(MinecraftServer server) {
+        if (VANISHED_PLAYERS.isEmpty()) {
+            vanishRefreshTicker = 0;
+            return;
+        }
+
+        if (++vanishRefreshTicker < VANISH_REFRESH_INTERVAL_TICKS) {
+            return;
+        }
+
+        vanishRefreshTicker = 0;
+
+        for (UUID uuid : VANISHED_PLAYERS) {
+            ServerPlayerEntity vanished = server.getPlayerManager().getPlayer(uuid);
+            if (vanished == null) {
+                continue;
+            }
+
+            vanished.setInvisible(true);
+
+            PlayerRemoveS2CPacket removePacket =
+                    new PlayerRemoveS2CPacket(List.of(uuid));
+
+            for (ServerPlayerEntity viewer : server.getPlayerManager().getPlayerList()) {
+                if (viewer != vanished) {
+                    viewer.networkHandler.sendPacket(removePacket);
+                }
+            }
         }
     }
 

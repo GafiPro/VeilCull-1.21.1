@@ -26,8 +26,26 @@ jobs:
       - name: Build
         run: gradle build --no-daemon --max-workers=1
 
-      - name: Upload jar
+      - name: Stage and verify server mod
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          MAIN_JAR="$(find build/libs -maxdepth 1 -type f -name 'veilcull-*.jar' ! -name '*-sources.jar' ! -name '*-dev.jar' | head -n 1)"
+          test -n "$MAIN_JAR"
+          cp "$MAIN_JAR" dist/VeilCull-1.21.1-server.jar
+          jar tf dist/VeilCull-1.21.1-server.jar | grep -Fx 'me/gafipro/veilcull/VeilCull.class'
+          jar tf dist/VeilCull-1.21.1-server.jar | grep -Fx 'veilcull.mixins.json'
+          unzip -p dist/VeilCull-1.21.1-server.jar fabric.mod.json | grep -F '"id": "veilcull"'
+          if jar tf dist/VeilCull-1.21.1-server.jar | grep -q -- '-sources.jar'; then
+            echo "Source archive must not be nested in the runtime JAR."
+            exit 1
+          fi
+
+      - name: Upload server mod only
         uses: actions/upload-artifact@v4
         with:
-          name: veilcull-1.21.1
-          path: build/libs/*.jar
+          name: VeilCull-1.21.1-server
+          path: dist/VeilCull-1.21.1-server.jar
+          if-no-files-found: error
+          retention-days: 30

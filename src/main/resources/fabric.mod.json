@@ -6,7 +6,7 @@
   "description": "Server-side prank commands for Minecraft 1.21.1.",
   "authors": ["GafiPro"],
   "license": "MIT",
-  "environment": "server",
+  "environment": "*",
   "entrypoints": {
     "main": [
       "me.gafipro.veilcull.VeilCull"
